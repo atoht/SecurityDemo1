@@ -1,0 +1,235 @@
+apiVersion: triggers.tekton.dev/v1alpha1
+kind: TriggerTemplate
+metadata:
+  name: project-trigger-template
+spec:
+  params:
+  - name: path-to-context
+    description: The path to the build context, used by Kaniko
+    default: /start/storm-tracker
+  - name: path-to-deployment-file
+    description: The path to the yaml file describe how to deploy the application. 
+    default: deployment.yaml
+  - name: path-to-dockerfile
+    description: The path to the docker image build file
+    default: Dockerfile
+  - name: api-url
+    description: The api url for interacting with ibm cloud
+    default: cloud.ibm.com
+  - name: container-repo-url
+    description: Base url for container repository
+    default: us.icr.io
+  - name: container-repo-namespace
+    description: Namespace where image is located
+    default: living-on-the-cloud
+  - name: deployment-image
+    description: Name of image to be deployed
+    default: storm-tracker
+  - name: name-of-cluster
+    description: The number of cluster to deploy the image to
+    default: living-on-the-cloud
+  - name: cluster-region
+    description: The region where the cluster resides
+    default: us-south
+  - name: cluster-namespace
+    description: The namespace being used within the k8s cluster
+    default: default
+  - name: deployment-image-placeholder
+    description: Placeholder value within deployment yaml to be replaced
+    default: IMAGE
+  - name: git-repo-url
+    description: URL to the git repo to be cloned
+  - name: commit-id
+    description: The revision to build and deploy.
+  - name: git-access-token
+    description: The service account id the pipeline is run under
+  - name: apikey
+    description: Service Account API KEY for interacting with IBM Cloud note the specific syntax of apikey has special relevance to many IBM Cloud resources, so should not be changed.
+  resourcetemplates:
+  - apiVersion: tekton.dev/v1beta1
+    kind: PipelineRun
+    metadata:
+      generateName: $(params.deployment-image)-build-
+    spec:
+      serviceAccountName: service-account
+      pipelineRef:
+        name: project-pipeline
+      params:
+      - name: path-to-context
+        value: $(params.path-to-context)
+      - name: path-to-deployment-file
+        value: $(params.path-to-deployment-file)
+      - name: path-to-dockerfile
+        value: $(params.path-to-dockerfile)
+      - name: api-url
+        value: $(params.api-url)
+      - name: container-repo-url
+        value: $(params.container-repo-url)
+      - name: container-repo-namespace
+        value: $(params.container-repo-namespace)
+      - name: deployment-image
+        value: $(params.deployment-image)
+      - name: name-of-cluster
+        value: $(params.name-of-cluster)
+      - name: cluster-region
+        value: $(params.cluster-region)
+      - name: git-access-token
+        value: $(params.git-access-token)
+      - name: git-repo-url
+        value: $(params.git-repo-url)
+      - name: commit-id
+        value: $(params.commit-id)
+      - name: deployment-image-placeholder
+        value: $(params.deployment-image-placeholder)
+      - name: cluster-namespace
+        value: $(params.cluster-namespace)
+      workspaces:
+        - name: git-repo
+          persistentVolumeClaim:
+            claimName: $(uid)-pvc
+  - apiVersion: v1
+    stringData:
+      username: iamapikey
+      password: $(params.apikey)
+    kind: Secret
+    type: kubernetes.io/basic-auth
+    metadata:
+      name: ibm-cr-secret
+      annotations:
+        tekton.dev/docker-0: $(params.container-repo-url)
+  - apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: $(uid)-pvc
+    spec:
+      resources:
+        requests:
+          storage: 5Gi
+      volumeMode: Filesystem
+      accessModes:
+        - ReadWriteOnce
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: project-pipeline
+spec:
+  params:
+    - name: path-to-context
+      description: The path to the build context
+    - name: path-to-deployment-file
+      description: The path to the deployment file 
+    - name: path-to-dockerfile
+      description: The path to the dockerfile to build
+    - name: api-url
+      description: ibmcloud api url
+    - name: container-repo-url
+      description: Base url for container repository
+    - name: container-repo-namespace
+      description: Namespace where image image is located
+    - name: deployment-image
+      description: Name of image to be deployed
+    - name: name-of-cluster
+      description: The number of cluster to deploy the image to
+    - name: cluster-region
+      description: The region where the cluster resides
+    - name: mvn-goals
+      description: The Maven goals to run
+      type: array
+      default: ["package"]
+    - name: git-access-token
+      description: API Token for accessing private git repo
+    - name: git-repo-url
+      description: URL to git project that is being built 
+    - name: commit-id
+      description: Commit id to be pulled
+    - name: deployment-image-placeholder
+      description: Value to be searched on and replaced in YAML file
+    - name: cluster-namespace
+      description: Namespace in cluster to deploy to
+  workspaces:
+    - name: git-repo 
+      description: Workspace for holding the cloned source code from the git-repo
+  tasks:
+  - name: git-clone
+    taskRef:
+      name: git-clone-repo
+    params:
+      - name: git-access-token
+        value: $(params.git-access-token)
+      - name: repository
+        value: $(params.git-repo-url)
+      - name: revision
+        value: $(params.commit-id)
+    workspaces:
+      - name: output
+        workspace: git-repo
+  - name: build-artifact-from-source
+    taskRef:
+      name: maven-build-java-artifact-from-source
+    runAfter:
+      - git-clone
+    params:
+      - name: mvn-goals
+        type: array
+        value: ["package"]
+      - name: path-to-context
+        value: $(params.path-to-context)
+    workspaces:
+      - name: source
+        workspace: git-repo
+  - name: build-image-send-to-cr
+    taskRef:
+      name: build-image-and-push-image
+    runAfter:
+      - build-artifact-from-source
+    params:
+    - name: container-repo-url
+      value: $(params.container-repo-url)
+    - name: container-repo-namespace
+      value: $(params.container-repo-namespace)
+    - name: deployment-image
+      value: $(params.deployment-image)
+    - name: path-to-context
+      value: $(params.path-to-context)
+    workspaces:
+      - name: source
+        workspace: git-repo
+  - name: update-image-ref-in-deployment
+    taskRef:
+      name: update-yaml-file
+    runAfter:
+      - build-image-send-to-cr
+    params:
+    - name: path-to-deployment-file
+      value: $(params.path-to-deployment-file)
+    - name: path-to-context
+      value: $(params.path-to-context)
+    - name: placeholder-name
+      value: $(params.deployment-image-placeholder)
+    - name: replacement-value
+      value: $(tasks.build-image-send-to-cr.results.full-image-path)
+    workspaces:
+      - name: source
+        workspace: git-repo
+  - name: deploy-image-to-ibm-cloud
+    taskRef:
+      name: deploy-image-to-ibm-cloud
+    runAfter:
+      - update-image-ref-in-deployment
+    params:
+    - name: path-to-deployment-file
+      value: $(params.path-to-deployment-file)
+    - name: name-of-cluster
+      value: $(params.name-of-cluster)
+    - name: cluster-region
+      value: $(params.cluster-region)
+    - name: api-url
+      value: $(params.api-url)
+    - name: cluster-namespace
+      value: $(params.cluster-namespace)
+    - name: path-to-context
+      value: $(params.path-to-context)
+    workspaces:
+      - name: source
+        workspace: git-repo
